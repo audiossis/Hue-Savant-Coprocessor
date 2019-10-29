@@ -1,0 +1,17 @@
+[Unit]
+Description=The Hue Savant Co-Processor
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Environment=HUESAVANTCOPROC_STARTED_BY_SYSTEMD=true
+#WorkingDirectory=/root/Hue-Savant-Coprocessor/coprocessor/
+ExecStart=/root/Hue-Savant-Coprocessor/coprocessor/hue-coprocessor.py -v -d -t HA_GEOFENCE -t SML001 -t Room -t RWL021 -t ZGPSWITCH
+ExecStop=kill -9 $(ps -A | grep hue | cut -d" " -f1)
+PrivateTmp=true
+PIDFile=/var/www/lighting/tmp/hue_savant_coproc.pid
+Restart=always
+RestartSec=5s
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
