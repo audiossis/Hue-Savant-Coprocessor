@@ -1,0 +1,18 @@
+[Unit]
+Description=Advertises to Savant System Monitor
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Environment=UDPSERVER1124_STARTED_BY_SYSTEMD=true
+#WorkingDirectory=/home/www-data/clipsal
+type=forking
+ExecStart=/usr/local/sbin/udpserver1124.py
+ExecStop=/bin/kill -9 $(systemctl status udpserver1124 | grep "Main PID:" | cut -d" "  -f4)
+PrivateTmp=true
+#PIDFile=/var/www/lighting/tmp/udpserver1124.pid
+Restart=always
+RestartSec=5s
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

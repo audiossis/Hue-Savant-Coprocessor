@@ -61,7 +61,6 @@ gamutc = (
     xypoint(0.153, 0.048),
 )
 
-
 class ColorHelper:
     def __init__(self, gamut=gamutb):
         self.red = gamut[0]
@@ -153,7 +152,6 @@ class ColorHelper:
         r, g, b = map(lambda x: int(x * 255), [r, g, b])
         return r, g, b
 
-
 class Converter:
     def __init__(self, gamut=gamutb):
         self.color = ColorHelper(gamut)
@@ -166,7 +164,7 @@ class Converter:
         r, g, b = self.color.get_rgb_from_xy_and_brightness(x, y, bri)
         return r, g, b
 
-
+# Listens for incoming client connections... forwards commands to the HTTP bridge thread
 class CommunicationServer(threading.Thread):
     def __init__(self, message_queue, http_communications):
         threading.Thread.__init__(self)
@@ -255,7 +253,7 @@ class CommunicationServer(threading.Thread):
                     logger.debug("#D1842 Force a new connection to break connection listener")
                     sock2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock2.connect(self.server_address)
-                    time.sleep(1)
+                    time.sleep(0.1)
                     break
                 if message == 'restart':
                     logger.debug("#D2492 Restart requested from message queue")
@@ -287,6 +285,11 @@ class CommunicationServer(threading.Thread):
         logger.debug("#D5465 Finishing message processor thread")
 
     def listen_messages(self, connection, client_address):
+        # global http_key
+        # global http_ip_address
+        # global file_settings
+        global all_scene_data
+
         try:
             logger.info('#E8007 %s connected.' % client_address[0])
             self.lock.acquire()
@@ -307,6 +310,7 @@ class CommunicationServer(threading.Thread):
                 datarecv = datarecv.replace('\n', '')
                 datarecv = datarecv.replace('\r', '')
                 data = datarecv
+                # EXIT Routines
                 if data.encode('hex') == 'fffb06':
                     logger.debug("#D3612 Received ^C from client %s. Closing client connection" % client_address[0])
                     connection.close()
@@ -323,38 +327,95 @@ class CommunicationServer(threading.Thread):
                 elif data == '':
                     logger.debug("#D3713 Received empty data string from client %s" % client_address[0])
                     connection.send("#32" + 'Empty Command String\r\n')
+                # Command Data Processor
                 else:
                     try:
-                        logger.debug("#D5443 Received command from client: %s" % client_address[0])
                         command = data
                         split_data = command.split('%')
+                        logger.debug("#D5443 Received command from client: %s : %s" %(client_address[0],str(split_data)))
                         try:
                             command = split_data[0]
                             body = split_data[1]
-                            if len(split_data) == 3:
-                                return_data = self.httpcomms.send_command(cmd_type='put', command=command,
-                                                                          body=json.loads(body), xy=split_data[2])
+                            # Forward Command to Hue Bridge/s
+                            if len(split_data) >= 3 and split_data[2] != '' and split_data[2] != 'x':
+                                logger.debug("RGB Data recieved")
+                                if split_data[3] != '':
+                                    return_data = self.httpcomms.send_command(cmd_type='put', command=command, body=json.loads(body), xy=split_data[2], bridgeIndex=BridgeIndex)
+                                else:
+                                    return_data = self.httpcomms.send_command(cmd_type='put', command=command, body=json.loads(body), xy=split_data[2])
                             else:
-                                return_data = self.httpcomms.send_command(cmd_type='put', command=command,
-                                                                          body=json.loads(body))
+                                logger.debug("Standard Data received")
+                                if len(split_data) >= 4 and split_data[3] != '':
+                                    return_data = self.httpcomms.send_command(cmd_type='put', command=command, body=json.loads(body), bridgeIndex=split_data[3])
+                                else:
+                                    return_data = self.httpcomms.send_command(cmd_type='put', command=command, body=json.loads(body))
                             try:
                                 for update in json.loads(return_data):
                                     if 'success' in update:
                                         for key in update['success']:
                                             keys = key.strip("/").split("/")
+                                            i=0
+                                            parsed_keys = {}
+                                            while i < len(keys):
+                                                parsed_keys[str(keys[i])] = (str(keys[i+1]))
+                                                i+=2
                                             if update['success'][key] == "0":
                                                 mydata = {keys[2]: {keys[3]: update['success'][key]}}
                                                 if keys[3] == "on" and not bool(update['success'][key]):
                                                     mydata[keys[2]]["bri"] = "0"
                                                 connection.send("#" + json.dumps(
                                                     {keys[0].rstrip('s'): {"id": keys[1], "info": mydata}}) + '\r\n')
+                                            elif update['success'][key] == 0:
+                                                mydata = {keys[2]: {keys[3]: update['success'][key]}}
+                                                if keys[3] == "on" and not bool(update['success'][key]):
+                                                    mydata[keys[2]]["bri"] = "0"
+                                                connection.send("#" + json.dumps({keys[0].rstrip('s'): {"id": keys[1], "info": mydata}}) + '\r\n')
+                                            elif 'action' in parsed_keys and parsed_keys['action'] == 'scene':
+                                                try:
+                                                    parsedSceneData = {}
+                                                    currSceneData = {}
+                                                    for key in update['success'].keys():
+                                                        currSceneID = update['success'][key]
+                                                        currSceneData = all_scene_data[currSceneID]
+                                                        currSceneData['SceneID'] = currSceneID
+                                                        try:
+                                                            if split_data[3] != '':
+                                                                http_ip_address, http_key, bridgeCount = parse_settings(str(split_data[3]))
+                                                                BridgeIndex = str(split_data[3])
+                                                            else:
+                                                                http_ip_address, http_key, bridgeCount = parse_settings("1")
+                                                                BridgeIndex = "1"
+                                                        except:
+                                                            http_ip_address, http_key, bridgeCount = parse_settings("1")
+                                                            BridgeIndex = "1"
+                                                        try:
+                                                            for sceneKey in all_scene_data:
+                                                                if 'group' in all_scene_data[sceneKey]:
+                                                                    if all_scene_data[sceneKey]['group'] == currSceneData['group']:
+                                                                        parsedSceneData['SceneData'] = all_scene_data[sceneKey]
+                                                                        parsedSceneData['SceneData']['SceneActive'] = 0
+                                                                        connection.send("#" + json.dumps(parsedSceneData) + '\r\n')
+                                                                else:
+                                                                    logger.debug("#D6940 Global Scene with no group association found... this is stub code, please fix me.. Scene ID: %s" % sceneKey)
+                                                        except Exception ,err:
+                                                            logger.error("#E3020 %s" % err)
+                                                            connection.send('#E8410 %s\r\n' % err)
+                                                        parsedSceneData['SceneData'] = currSceneData
+                                                        parsedSceneData['SceneData']['SceneActive'] = 1
+                                                        connection.send("#" + json.dumps(parsedSceneData) + '\r\n')
+
+                                                except Exception ,err:
+                                                    logger.error("#E3019 %s" % err)
+                                                    connection.send('#E8409 %s\r\n' % err)
                                             else:
                                                 connection.send("#" + json.dumps(update) + '\r\n')
                                     else:
                                         connection.send("#" + json.dumps(update) + '\r\n')
                             except TypeError:
                                     connection.send("#" + json.dumps(return_data) + '\r\n')
-
+                            except Exception, err:
+                                logger.error("#E3016 %s" % err, exc_info=True)
+                                connection.send('#E8407 %s\r\n' % err)
                         except IndexError:
                             return_data = self.httpcomms.send_command(cmd_type='get', command=command)
                             for item in return_data:
@@ -363,9 +424,6 @@ class CommunicationServer(threading.Thread):
                                         return_data[item]['state']['bri'] = 0
                                         return_data[item]['state']['hue'] = 0
                                         return_data[item]['state']['sat'] = 0
-
-                                    print return_data
-
                                     return_me = return_data[item]
                                 elif command == "groups":
                                     if not return_data[item]["type"] in devicetypes:
@@ -378,28 +436,23 @@ class CommunicationServer(threading.Thread):
                                 elif command == "scenes":
                                     if len(return_data[item]["appdata"]) < 0:
                                         continue
-                                    return_me = {"name": return_data[item]["name"],
-                                                 "lights": ', '.join(return_data[item]["lights"])}
+                                    return_me = {"name": return_data[item]["name"], "lights": ', '.join(return_data[item]["lights"])}
                                 elif command == "sensors":
                                     if not return_data[item]["modelid"] in devicetypes:
                                         continue
                                     return_me = return_data[item]
                                 else:
                                     return_me = return_data[item]
-                                connection.send("#" + json.dumps(
-                                    {command.rstrip("s"): {"id": item, "info": return_me}}) + '\r\n')
+                                connection.send("#" + json.dumps({command.rstrip("s"): {"id": item, "info": return_me}}) + '\r\n')
                         except TypeError:
-                            logger.debug("#D6939 TypeError, could not process received data from client %s"
-                                         % client_address[0])
+                            logger.debug("#D6939 TypeError, could not process received data from client %s" % client_address[0])
                             connection.send('#E0658 TypeError, could not process received data\r\n')
 
                     except ValueError:
-                        logger.debug("#D2057 ValueError, could not process received data from client %s"
-                                     % client_address[0])
+                        logger.debug("#D2057 ValueError, could not process received data from client %s" % client_address[0])
                         connection.send('#E7804 ValueError, could not process received data\r\n')
                     except TypeError:
-                        logger.debug("#D9011 TypeError, could not process received data from client %s"
-                                     % client_address[0])
+                        logger.debug("#D9011 TypeError, could not process received data from client %s" % client_address[0])
                         connection.send('#E7223 TypeError, could not process received data\r\n')
                     except Exception, err:
                         logger.error("#E3017 %s" % err, exc_info=True)
@@ -407,8 +460,7 @@ class CommunicationServer(threading.Thread):
 
             logger.debug("#D4024 Client %s thread closing" % client_address[0])
             self.lock.acquire()
-            logger.debug("#D4694 Removing client %s from clients array, and thread from threads array"
-                         % client_address[0])
+            logger.debug("#D4694 Removing client %s from clients array, and thread from threads array" % client_address[0])
             self.clients.remove(connection)
             self.threads.remove(threading.currentThread())
             self.lock.release()
@@ -417,7 +469,6 @@ class CommunicationServer(threading.Thread):
         except Exception, err:
             logger.error("#E0910 %s" % err, exc_info=True)
 
-
 class HTTPBridge(threading.Thread):
     def __init__(self, savant_queue):
         threading.Thread.__init__(self)
@@ -425,7 +476,10 @@ class HTTPBridge(threading.Thread):
         self.lock = threading.Lock()
         self.threads = []
         self.converter = Converter(gamutc)
-        self.store = {"lights": {}, "groups": {}, "sensors": {}, "scenes": {}, "all": {}}
+        self.store = {"1": {"lights": {}, "groups": {}, "sensors": {}, "scenes": {}, "all": {}},
+                      "2": {"lights": {}, "groups": {}, "sensors": {}, "scenes": {}, "all": {}},
+                      "3": {"lights": {}, "groups": {}, "sensors": {}, "scenes": {}, "all": {}},
+                      "4": {"lights": {}, "groups": {}, "sensors": {}, "scenes": {}, "all": {}}}
         logger.debug("#D0930 HTTPBridge started")
 
     def run(self):
@@ -463,135 +517,134 @@ class HTTPBridge(threading.Thread):
         logger.debug("#D0890 Poller PID: %s" % threading.currentThread().ident)
         while True:
             try:
-                if verbose:
-                    logger.debug("#D4899 Asking for device statuses from %s" % http_ip_address)
-                result = self.send_command()
-                if verbose:
-                    logger.debug("#D2547 Received update successfully. Processing data...")
-                removekeys = ['config', 'resourcelinks', 'rules', 'schedules']
-                for removekey in removekeys:
-                    try:
-                        del result[removekey]
-                    except KeyError:
-                        pass
-
-                if not self.store['all'] == result:
-                    logger.debug("#D8176 HTTP Data chanced since last poll")
-                    self.store["all"] = copy.deepcopy(result)
-                    #
-                    # Lights
-                    #
-                    for light_id in result['lights']:
-                        light_data = result['lights'][light_id]
-
-                        if light_id not in self.store["lights"]:
-                            logger.debug("#D0139 Found a new LightID '%s', adding it to monitored lights" % light_id)
-                            self.store["lights"][light_id] = copy.deepcopy(light_data)
+                i = 1
+                bridgeCount = 1
+                while i <= bridgeCount:
+                    http_ip_address, http_key, bridgeCount = parse_settings(str(i))
+                    result = self.send_command(bridgeIndex=i)
+                    removekeys = ['config', 'resourcelinks', 'rules', 'schedules']
+                    for removekey in removekeys:
                         try:
-                            if not self.store["lights"][light_id] == light_data:
-                                logger.debug("#D2000 Light '%s' information has changed"
-                                             % light_id)
-                                self.store["lights"][light_id] = copy.deepcopy(light_data)
-                                logger.debug("#D1820 Notifying all clients of level change for light '%s'"
-                                             % light_id)
-                                if not light_data['state']['on']:
-                                    light_data['state']['bri'] = 0
-                                    light_data['state']['hue'] = 0
-                                    light_data['state']['sat'] = 0
-                                for key in remove_keys:
-                                    try:
-                                        light_data.pop(key, None)
-                                    except KeyError:
-                                        pass
-                                    except IndexError:
-                                        pass
-                                self.message_queue.put("#" + json.dumps(
-                                    {"light": {"id": light_id, "info": light_data}}))
-                                if 'xy' in light_data['state']:
-                                    pntx, pnty = light_data['state']['xy']
-                                    red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
+                            del result[removekey]
+                        except KeyError:
+                            pass
 
-                                    self.message_queue.put("#" + json.dumps(
-                                        {"light_rgb": {"id": light_id, "info": [
-                                            {"color": "r", "value": red},
-                                            {"color": "g", "value": green},
-                                            {"color": "b", "value": blue}
-                                        ]}}
-                                    ))
-                        except Exception, err:
-                            logger.error("#E6663 %s" % err, exc_info=True)
-                    #
-                    # Groups
-                    #
-                    for group_id in result['groups']:
-                        if result["groups"][group_id]["type"] in devicetypes:
-                            group_data = result['groups'][group_id]
-                            if group_id not in self.store["groups"]:
-                                logger.debug("#D2418 Found a new GroupID '%s', adding it to monitored groups"
-                                             % group_id)
-                                self.store["groups"][group_id] = copy.deepcopy(group_data)
-                            try:
-                                if not self.store["groups"][group_id] == group_data:
-                                    logger.debug("#D9999 Group '%s' information has changed"
-                                                 % group_id)
-                                    self.store["groups"][group_id] = copy.deepcopy(group_data)
-                                    logger.debug("#D0908 Notifying all clients of level change for group '%s'"
-                                                 % group_id)
-                                    if not group_data['action']['on']:
-                                        group_data['action']['bri'] = 0
-                                        group_data['action']['hue'] = 0
-                                        group_data['action']['sat'] = 0
-                                    self.message_queue.put("#" + json.dumps(
-                                        {"group": {"id": group_id, "info": group_data}}))
-                                    if 'xy' in group_data['action']:
-                                        pntx, pnty = group_data['action']['xy']
-                                        red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
+                    if not self.store[str(i)]['all'] == result:
+                        # logger.debug("#D8176 HTTP Data changed since last poll")
+                        self.store[str(i)]["all"] = copy.deepcopy(result)
+                        # Lights
+                        for light_id in result['lights']:
+                            light_data = result['lights'][light_id]
 
-                                        self.message_queue.put("#" + json.dumps(
-                                            {"group_rgb": {"id": group_id, "info": [
-                                                {"color": "r", "value": red},
-                                                {"color": "g", "value": green},
-                                                {"color": "b", "value": blue}
-                                            ]}}
-                                        ))
-                            except Exception, err:
-                                logger.error("#E7134 %s" % err, exc_info=True)
-                    #
-                    # Sensors
-                    #
-                    for sensor_id in result['sensors']:
-                        if result["sensors"][sensor_id]["modelid"] in devicetypes:
-                            sensor_data = result['sensors'][sensor_id]
-                            if sensor_id not in self.store["sensors"]:
-                                logger.debug("#D0278 Found a new SensorID '%s', adding it to monitored "
-                                             "sensors" % sensor_id)
-                                self.store["sensors"][sensor_id] = copy.deepcopy(sensor_data)
+                            if light_id not in self.store[str(i)]["lights"]:
+                                logger.debug("#D0139 Found a new LightID '%s', adding it to monitored lights" % light_id)
+                                self.store[str(i)]["lights"][light_id] = copy.deepcopy(light_data)
                             try:
-                                if not self.store["sensors"][sensor_id] == sensor_data:
-                                    logger.debug("#D1170 Sensor '%s' information has changed"
-                                                 % sensor_id)
-                                    self.store["sensors"][sensor_id] = copy.deepcopy(sensor_data)
-                                    logger.debug("#D4421 Notifying all clients of level change for sensor '%s'"
-                                                 % sensor_id)
+                                if not self.store[str(i)]["lights"][light_id] == light_data:
+                                    logger.debug("#D2000 Light '%s' information has changed" % light_id)
+                                    self.store[str(i)]["lights"][light_id] = copy.deepcopy(light_data)
+                                    logger.debug("#D1820 Notifying all clients of level change for light '%s'" % light_id)
+                                    if not light_data['state']['on']:
+                                        light_data['state']['bri'] = 0
+                                        light_data['state']['hue'] = 0
+                                        light_data['state']['sat'] = 0
                                     for key in remove_keys:
                                         try:
-                                            sensor_data.pop(key, None)
+                                            light_data.pop(key, None)
                                         except KeyError:
                                             pass
                                         except IndexError:
                                             pass
-                                    self.message_queue.put("#" + json.dumps({
-                                        "sensor": {"id": sensor_id, "info": sensor_data}}))
-                            except Exception, err:
-                                logger.error("#E3942 %s" % err, exc_info=True)
+                                    self.message_queue.put("#" + json.dumps({"light": {"id": light_id, "info": light_data, "BridgeIndex": str(i), "BridgeKey": str(http_key)}}))
+                                    if 'xy' in light_data['state']:
+                                        pntx, pnty = light_data['state']['xy']
+                                        red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
 
+                                        self.message_queue.put("#" + json.dumps(
+                                            {"light_rgb": {"id": light_id, "info": [
+                                                {"color": "r", "value": red},
+                                                {"color": "g", "value": green},
+                                                {"color": "b", "value": blue}
+                                            ], "BridgeIndex": str(i), "BridgeKey": str(http_key)}}
+                                        ))
+                            except Exception, err:
+                                logger.error("#E6663 %s" % err, exc_info=True)
+                        # Groups
+                        for group_id in result['groups']:
+                            if result["groups"][group_id]["type"] in devicetypes:
+                                group_data = result['groups'][group_id]
+                                if group_id not in self.store[str(i)]["groups"]:
+                                    logger.debug("#D2418 Found a new GroupID '%s', adding it to monitored groups"
+                                                 % group_id)
+                                    self.store[str(i)]["groups"][group_id] = copy.deepcopy(group_data)
+                                try:
+                                    if not self.store[str(i)]["groups"][group_id] == group_data:
+                                        logger.debug("#D9999 Group '%s' information has changed"  % group_id)
+                                        self.store[str(i)]["groups"][group_id] = copy.deepcopy(group_data)
+                                        logger.debug("#D0908 Notifying all clients of level change for group '%s'" % group_id)
+                                        if not group_data['action']['on']:
+                                            group_data['action']['bri'] = 0
+                                            group_data['action']['hue'] = 0
+                                            group_data['action']['sat'] = 0
+                                        self.message_queue.put("#" + json.dumps({"group": {"id": group_id, "info": group_data, "BridgeIndex": str(i), "BridgeKey": str(http_key)}}))
+                                        if 'xy' in group_data['action']:
+                                            pntx, pnty = group_data['action']['xy']
+                                            red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
+
+                                            self.message_queue.put("#" + json.dumps(
+                                                {"group_rgb": {"id": group_id, "info": [
+                                                    {"color": "r", "value": red},
+                                                    {"color": "g", "value": green},
+                                                    {"color": "b", "value": blue}
+                                                ], "BridgeIndex": str(i), "BridgeKey": str(http_key)}}
+                                            ))
+                                except Exception, err:
+                                    logger.error("#E7134 %s" % err, exc_info=True)
+                        # Sensors
+                        for sensor_id in result['sensors']:
+                            if result["sensors"][sensor_id]["modelid"] in devicetypes:
+                                sensor_data = result['sensors'][sensor_id]
+                                if sensor_id not in self.store[str(i)]["sensors"]:
+                                    logger.debug("#D0278 Found a new SensorID '%s', adding it to monitored "
+                                                 "sensors" % sensor_id)
+                                    self.store[str(i)]["sensors"][sensor_id] = copy.deepcopy(sensor_data)
+                                try:
+                                    if not self.store[str(i)]["sensors"][sensor_id] == sensor_data:
+                                        logger.debug("#D1170 Sensor '%s' information has changed"
+                                                     % sensor_id)
+                                        self.store[str(i)]["sensors"][sensor_id] = copy.deepcopy(sensor_data)
+                                        logger.debug("#D4421 Notifying all clients of level change for sensor '%s'"
+                                                     % sensor_id)
+                                        for key in remove_keys:
+                                            try:
+                                                sensor_data.pop(key, None)
+                                            except KeyError:
+                                                pass
+                                            except IndexError:
+                                                pass
+                                        self.message_queue.put("#" + json.dumps({
+                                            "sensor": {"id": sensor_id, "info": sensor_data, "BridgeIndex": str(i), "BridgeKey": str(http_key)}}))
+                                except Exception, err:
+                                    logger.error("#E3942 %s" % err, exc_info=True)
+                        # Scenes
+                        for scene in result['scenes']:
+                            http_ip_address, http_key, bridgeCount = parse_settings(str(i))
+                            self.store[str(i)]['all']['scenes'][scene]['BridgeKey'] = str(http_key)
+                            self.store[str(i)]['all']['scenes'][scene]['BridgeIndex'] = str(i)
+                            self.store[str(i)]['all']['scenes'][scene]['SceneID'] = str(scene)
+
+                    i+=1
+                    time.sleep(0.06)
             except Exception, err:
                 logger.error("#E9155 %s" % err, exc_info=True)
-            if verbose:
-                logger.debug("#D5604 Finished poll. Waiting for next poll.")
             time.sleep(http_poll_interval)
 
-    def send_command(self, cmd_type='get', command='', body=None, xy=None):
+    def send_command(self, cmd_type='get', command='', body=None, xy=None, bridgeIndex=1):
+        # logger.debug("Command received for bridge: " + str(bridgeIndex))
+        try:
+            http_ip_address, http_key, bridgeCount = parse_settings(str(bridgeIndex))
+        except Exception, err:
+            logger.error("#E0302 Caught an error: %s" % (err))
         result = ''
         if body is None:
             body = {}
@@ -599,8 +652,7 @@ class HTTPBridge(threading.Thread):
             if cmd_type == 'get':
                 if command:
                     try:
-                        result = json.loads(urllib2.urlopen("http://%s/api/%s/%s"
-                                                            % (http_ip_address, http_key, command), timeout=4).read())
+                        result = json.loads(urllib2.urlopen("http://%s/api/%s/%s" % (http_ip_address, http_key, command), timeout=4).read())
                         if verbose:
                             logger.debug("#D9455 Sent command (%s) to controller" % command)
                     except urllib2.HTTPError:
@@ -608,35 +660,31 @@ class HTTPBridge(threading.Thread):
                     except TypeError:
                         logger.error("#E6378 Command ('%s') JSON Type Error" % command)
                     except Exception, err:
-                        logger.error("#E0301 Command ('%s') Caught an error: %s" %
-                                     (command, err), exc_info=True)
+                        logger.error("#E0301 Command ('%s') Caught an error: %s" % (command, err), exc_info=True)
                 else:
                     try:
-                        result = json.loads(urllib2.urlopen("http://%s/api/%s" % (http_ip_address, http_key),
-                                                            timeout=4).read())
-                        if verbose:
-                            logger.debug("#D5451 Command ('State Poll') sent successfully")
+                        result = json.loads(urllib2.urlopen("http://%s/api/%s" % (http_ip_address, http_key), timeout=4).read())
+                        # if verbose:
+                        #     logger.debug("#D5451 Command ('State Poll') sent successfully")
                     except urllib2.HTTPError:
                         logger.error("#E9087 Command ('State Poll') HTTP Error")
                     except TypeError:
                         logger.error("#E8721 Command ('State Poll') JSON Type Error")
                     except Exception, err:
-                        logger.error("#E9031 Command (State Poll') Caught an error: %s" %
-                                     err, exc_info=True)
+                        logger.error("#E9031 Command (State Poll') Caught an error: %s" % err, exc_info=True)
             elif cmd_type == 'put':
                 if xy:
                     part_a = command.split('/')
                     if part_a[0] == 'lights':
-                        pntx, pnty = self.store[part_a[0]][part_a[1]]['state']['xy']
+                        pntx, pnty = self.store[str(i)][part_a[0]][part_a[1]]['state']['xy']
                     else:
-                        pntx, pnty = self.store[part_a[0]][part_a[1]]['action']['xy']
+                        pntx, pnty = self.store[str(i)][part_a[0]][part_a[1]]['action']['xy']
                     cur_r, cur_g, cur_b = self.converter.xy_to_rgb(pntx, pnty)
                     if xy == "r":
                         pntxx, pntyy = self.converter.rgb_to_xy(body['bri'], cur_g, cur_b)
                     elif xy == "g":
                         pntxx, pntyy = self.converter.rgb_to_xy(cur_r, body['bri'], cur_b)
-                    else:
-                        # xy == "b" - assumed
+                    elif xy == "b":
                         pntxx, pntyy = self.converter.rgb_to_xy(cur_r, cur_g, body['bri'])
                     body = {'on': True, 'xy': [pntxx, pntyy]}
                 elif "bri" in body:
@@ -646,12 +694,11 @@ class HTTPBridge(threading.Thread):
                         body['on'] = False
                         body.pop('bri', None)
                 try:
-                    request = urllib2.Request("http://%s/api/%s/%s" % (http_ip_address, http_key,
-                                                                       command), json.dumps(body))
+                    request = urllib2.Request("http://%s/api/%s/%s" % (http_ip_address, http_key, command), json.dumps(body))
                     request.get_method = lambda: 'PUT'
                     result = urllib2.urlopen(request, timeout=4).read()
                     if verbose:
-                        logger.debug("#D7207 Sent command (%s - %s) to controller" % (command, json.dumps(body)))
+                        logger.debug("#D7207 Sent command (%s - %s - %s - %s) to controller" % (command, json.dumps(body), http_ip_address, http_key))
                 except urllib2.HTTPError:
                     logger.error("#E5411 Command ('%s') HTTP Error" % command)
                 except ValueError:
@@ -664,9 +711,8 @@ class HTTPBridge(threading.Thread):
             else:
                 if command:
                     try:
-                        result = json.loads(urllib2.urlopen(urllib2.Request(
-                            "http://%s/api/%s/%s" % (http_ip_address, http_key, command), json.dumps(body)),
-                            timeout=4).read())
+                        result = json.loads(urllib2.urlopen(urllib2.Request("http://%s/api/%s/%s" % (http_ip_address, http_key, command), json.dumps(body)), timeout=4).read())
+                        # result = json.loads(urllib2.urlopen(urllib2.Request("http://%s/api/%s/%s" % (http_ip_address, http_key, command), json.dumps(body)), timeout=4).read())
                         if verbose:
                             logger.debug("#D7492 Sent command (%s - %s) to controller" % (command, json.dumps(body)))
                     except urllib2.HTTPError:
@@ -682,8 +728,8 @@ class HTTPBridge(threading.Thread):
                         logger.debug("#D1701 Command ('%s') sent successfully" % command)
                 else:
                     try:
-                        result = json.loads(urllib2.urlopen(urllib2.Request(
-                            "http://%s/api/%s" % (http_ip_address, http_key), json.dumps(body)), timeout=4).read())
+                        result = json.loads(urllib2.urlopen(urllib2.Request("http://%s/api/%s" % (http_ip_address, http_key), json.dumps(body)), timeout=4).read())
+                        # result = json.loads(urllib2.urlopen(urllib2.Request("http://%s/api/%s" % (http_ip_address, http_key), json.dumps(body)), timeout=4).read())
                         if verbose:
                             logger.debug("#D3329 Command ('State Poll') sent successfully")
                     except urllib2.HTTPError:
@@ -700,121 +746,133 @@ class HTTPBridge(threading.Thread):
             self.message_queue.put("#" + "Invalid HTTP command")
 
     def new_connect(self, connection):
+        global all_scene_data
         logger.debug("#E1154 New client connected. Sending all device states")
-        #
-        # Lights
-        #
-        try:
-            for light_id in self.store['lights']:
-                light_data = self.store['lights'][light_id]
-                if not light_data['state']['on']:
-                    light_data['state']['bri'] = 0
-                    light_data['state']['hue'] = 0
-                    light_data['state']['sat'] = 0
-                for key in remove_keys:
-                    try:
-                        light_data.pop(key, None)
-                    except KeyError:
-                        pass
-                    except IndexError:
-                        pass
-                connection.send("#" + json.dumps({"light": {"id": light_id, "info": light_data}}) + '\r\n')
-                # self.message_queue.put("#" + json.dumps({"light": {"id": light_id, "info": light_data}}))
-                if 'xy' in light_data['state']:
-                    pntx, pnty = light_data['state']['xy']
-                    red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
+        i = 1
+        bridgeCount = 1
+        while i <= bridgeCount:
+            http_ip_address, http_key, bridgeCount = parse_settings(str(i))
+            #
+            # Lights
+            #
+            try:
+                for light_id in self.store[str(i)]['lights']:
+                    light_data = self.store[str(i)]['lights'][light_id]
+                    if not light_data['state']['on']:
+                        light_data['state']['bri'] = 0
+                        light_data['state']['hue'] = 0
+                        light_data['state']['sat'] = 0
+                    for key in remove_keys:
+                        try:
+                            light_data.pop(key, None)
+                        except KeyError:
+                            pass
+                        except IndexError:
+                            pass
+                    connection.send("#" + json.dumps({"light": {"id": light_id, "info": light_data, "BridgeIndex": str(i), "BridgeKey": str(http_key)}}) + '\r\n')
+                    # self.message_queue.put("#" + json.dumps({"light": {"id": light_id, "info": light_data}}))
+                    if 'xy' in light_data['state']:
+                        pntx, pnty = light_data['state']['xy']
+                        red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
 
-                    self.message_queue.put("#" + json.dumps(
-                        {"light_rgb": {"id": light_id, "info": [
-                            {"color": "r", "value": red},
-                            {"color": "g", "value": green},
-                            {"color": "b", "value": blue}
-                        ]}}
-                    ))
-        except KeyError:
-            logger.error('#E4092 No Light info to send')
-        except socket.error, err:
-            logger.error("#E6782 socket.error: %s" % err, exc_info=True)
-            # Finish the function as nothing more will work
-            return None
-        except Exception, err:
-            logger.error("#E9683 Sending Lights to client caught an error: %s" % err, exc_info=True)
-        #
-        # Groups
-        #
-        try:
-            for group_id in self.store['groups']:
-                group_data = self.store['groups'][group_id]
-                if not group_data['action']['on']:
-                    group_data['action']['bri'] = 0
-                    group_data['action']['hue'] = 0
-                    group_data['action']['sat'] = 0
-                connection.send("#" + json.dumps({"group": {"id": group_id, "info": group_data}}) + '\r\n')
-                # self.message_queue.put("#" + json.dumps({"group": {"id": group_id, "info": group_data}}))
-                if 'xy' in group_data['action']:
-                    pntx, pnty = group_data['action']['xy']
-                    red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
+                        self.message_queue.put("#" + json.dumps(
+                            {"light_rgb": {"id": light_id, "info": [
+                                {"color": "r", "value": red},
+                                {"color": "g", "value": green},
+                                {"color": "b", "value": blue}
+                            ]}}
+                        ))
+            except KeyError:
+                logger.error('#E4092 No Light info to send')
+            except socket.error, err:
+                logger.error("#E6782 socket.error: %s" % err, exc_info=True)
+                # Finish the function as nothing more will work
+                return None
+            except Exception, err:
+                logger.error("#E9683 Sending Lights to client caught an error: %s" % err, exc_info=True)
+            #
+            # Groups
+            #
+            try:
+                for group_id in self.store[str(i)]['groups']:
+                    group_data = self.store[str(i)]['groups'][group_id]
+                    if not group_data['action']['on']:
+                        group_data['action']['bri'] = 0
+                        group_data['action']['hue'] = 0
+                        group_data['action']['sat'] = 0
+                    connection.send("#" + json.dumps({"group": {"id": group_id, "info": group_data, "BridgeIndex": str(i), "BridgeKey": str(http_key)}}) + '\r\n')
+                    # self.message_queue.put("#" + json.dumps({"group": {"id": group_id, "info": group_data}}))
+                    if 'xy' in group_data['action']:
+                        pntx, pnty = group_data['action']['xy']
+                        red, green, blue = self.converter.xy_to_rgb(pntx, pnty)
 
-                    self.message_queue.put("#" + json.dumps(
-                        {"group_rgb": {"id": group_id, "info": [
-                            {"color": "r", "value": red},
-                            {"color": "g", "value": green},
-                            {"color": "b", "value": blue}
-                        ]}}
-                    ))
-        except KeyError:
-            logger.error('#E1435 No Group info to send')
-        except socket.error, err:
-            logger.error("#E8313 socket.error: %s" % err, exc_info=True)
-            # Finish the function as nothing more will work
-            return None
-        except Exception, err:
-            logger.error("#E7062 Sending Group to client caught an error: %s" % err, exc_info=True)
-        #
-        # Sensors
-        #
-        try:
-            for sensor_id in self.store['sensors']:
-                sensor_data = self.store['sensors'][sensor_id]
-                for key in remove_keys:
-                    try:
-                        sensor_id.pop(key, None)
-                    except KeyError:
-                        pass
-                    except IndexError:
-                        pass
-                connection.send("#" + json.dumps({"sensor": {"id": sensor_id, "info": sensor_data}}) + '\r\n')
-                # self.message_queue.put("#" + json.dumps({"sensor": {"id": sensor_id, "info": sensor_data}}))
-        except KeyError:
-            logger.error('#E6132 No Sensor info to send')
-        except socket.error, err:
-            logger.error("#E8114 socket.error: %s" % err, exc_info=True)
-            # Finish the function as nothing more will work
-            return None
-        except Exception, err:
-            logger.error("#E2635 Sending Sensors to client caught an error: %s" % err, exc_info=True)
-        #
-        # Scenes
-        #
-        try:
-            for scene_id in self.store['all']['scenes']:
-                scene_data = self.store['all']['scenes'][scene_id]
-                if len(scene_data["appdata"]) > 0:
-                    connection.send("#" + json.dumps({"scene": {"id": scene_id, "info": {
-                        "name": scene_data["name"], "lights": ', '.join(scene_data["lights"])}}}) + '\r\n')
-                    # self.message_queue.put("#" + json.dumps({"scene": {"id": scene_id, "info": {
-                    #    "name": scene_data["name"], "lights": ', '.join(scene_data["lights"])}}}))
-        except KeyError:
-            logger.error('#E0652 No Scene info to send')
-        except socket.error, err:
-            logger.error("#E3559 socket.error: %s" % err, exc_info=True)
-            # Finish the function as nothing more will work
-            return None
-        except Exception, err:
-            logger.error("#E4272 Sending Scenes to client caught an error: %s" % err, exc_info=True)
+                        self.message_queue.put("#" + json.dumps(
+                            {"group_rgb": {"id": group_id, "info": [
+                                {"color": "r", "value": red},
+                                {"color": "g", "value": green},
+                                {"color": "b", "value": blue}
+                            ]}}
+                        ))
+            except KeyError:
+                logger.error('#E1435 No Group info to send')
+            except socket.error, err:
+                logger.error("#E8313 socket.error: %s" % err, exc_info=True)
+                # Finish the function as nothing more will work
+                return None
+            except Exception, err:
+                logger.error("#E7062 Sending Group to client caught an error: %s" % err, exc_info=True)
+            #
+            # Sensors
+            #
+            try:
+                for sensor_id in self.store[str(i)]['sensors']:
+                    sensor_data = self.store[str(i)]['sensors'][sensor_id]
+                    for key in remove_keys:
+                        try:
+                            sensor_id.pop(key, None)
+                        except KeyError:
+                            pass
+                        except IndexError:
+                            pass
+                        finally:
+                            logger.error("#E6133 sensor_id: " + str(sensor_id))
 
+                        # This error needs rto be handled better
+                        # Traceback (most recent call last):
+                        #   File "/root/Hue-Savant-Coprocessor/coprocessor/hue-coprocessor.py", line 777, in new_connect
+                        #   sensor_id.pop(key, None)
+
+
+                    connection.send("#" + json.dumps({"sensor": {"id": sensor_id, "info": sensor_data, "BridgeIndex": str(i), "BridgeKey": str(http_key)}}) + '\r\n')
+                    # self.message_queue.put("#" + json.dumps({"sensor": {"id": sensor_id, "info": sensor_data}}))
+            except KeyError:
+                logger.error('#E6132 No Sensor info to send')
+            except socket.error, err:
+                logger.error("#E8114 socket.error: %s" % err, exc_info=True)
+                # Finish the function as nothing more will work
+                return None
+            except Exception, err:
+                logger.error("#E2635 Sending Sensors to client caught an error: %s" % err, exc_info=True)
+            #
+            # Scenes
+            #
+            try:
+                for scene_id in self.store[str(i)]['all']['scenes']:
+                    all_scene_data[scene_id] = self.store[str(i)]['all']['scenes'][scene_id]
+                    scene_data = self.store[str(i)]['all']['scenes'][scene_id]
+                    if len(scene_data["appdata"]) > 0:
+                        connection.send("#" + json.dumps({"scene": {"id": scene_id, "info": {"name": scene_data["name"], "lights": ', '.join(scene_data["lights"]), "BridgeIndex": str(i), "BridgeKey": str(http_key)}}}) + '\r\n')
+            except KeyError:
+                logger.error('#E0652 No Scene info to send')
+            except socket.error, err:
+                logger.error("#E3559 socket.error: %s" % err, exc_info=True)
+                # Finish the function as nothing more will work
+                return None
+            except Exception, err:
+                logger.error("#E4272 Sending Scenes to client caught an error: %s" % err, exc_info=True)
+            i+=1
+        # print str(all_scene_data)
         logger.debug("#D3476 Finished sending information to client")
-
 
 class SingleLevelFilter(logging.Filter):
     def __init__(self, passlevel, reject):
@@ -828,59 +886,46 @@ class SingleLevelFilter(logging.Filter):
         else:
             return record.levelno == self.passlevel
 
+class HTTPDiscovery(threading.Thread):
+    def __init__(self, message_queue, http_communications):
+        threading.Thread.__init__(self)
+        connection_loop = True
+        self.running = True
+        self.queue_test = False
+        self.threads = []
+        self.clients = []
+        self.lock = threading.Lock()
+        self.message_queue = message_queue
+        self.httpcomms = http_communications
+        while connection_loop:
+            print "Stub!"
 
-def run():
-    global server_running
-    queue = Queue(maxsize=100)
-    try:
-        logger.debug("#D3571 Starting the HTTP communications thread")
-        httpcomms = HTTPBridge(queue)
-        logger.debug("#D9699 Starting the Savant communications thread")
-        CommunicationServer(queue, httpcomms).start()
-        while server_running:
-            time.sleep(5)
-        queue.put('shutdown')
-        logger.info('#I3608 Restart request detected, restarting server')
-    except KeyboardInterrupt:
-        queue.put('shutdown')
-        logger.info('#I8417 KeyboardInterrupt detected, shutting down server')
-        raise SystemExit
-    except Exception, err:
-        queue.put('shutdown')
-        logger.error("#E3002 %s" % err, exc_info=True)
-    finally:
-        logger.debug("#D7856 Hit end of 'run()' function")
-        queue.put('shutdown')
-
-
-def discover_http():
-    try:
-        context = ssl._create_unverified_context()
-        result = json.loads(urllib2.urlopen("http://www.meethue.com/api/nupnp", context=context, timeout=4).read())[0]
-        return result['internalipaddress']
-    except Exception, err:
-        logger.error("E6845 %s" % err, exc_info=True)
-        return False
-
-
-def register_api_key(ip_address):
-    while True:
+    def discover_http():
         try:
-            logger.debug("#D1605 Obtaiing API key from: %s" % ip_address)
-            result = json.loads(urllib2.urlopen(urllib2.Request("http://%s/api" % ip_address, json.dumps(
-                {"devicetype": "HTTPBridge"})), timeout=4).read())[0]
-            if 'error' in result:
-                logger.error(json.dumps({"E7489 error": {"description": result["error"]["description"]}}))
-                time.sleep(10)
-            else:
-                logger.debug("D6282 API key successfully created: %s" % result["success"]["username"])
-                return result["success"]["username"]
+            context = ssl._create_unverified_context()
+            result = json.loads(urllib2.urlopen("http://www.meethue.com/api/nupnp", context=context, timeout=4).read())[0]
+            return result['internalipaddress']
         except Exception, err:
-
-            logger.error("E9800 %s" % err, exc_info=True)
+            logger.error("E6845 %s" % err, exc_info=True)
             return False
 
+    def register_api_key(ip_address):
+        while True:
+            try:
+                logger.debug("#D1605 Obtaiing API key from: %s" % ip_address)
+                result = json.loads(urllib2.urlopen(urllib2.Request("http://%s/api" % ip_address, json.dumps(
+                    {"devicetype": "HTTPBridge"})), timeout=4).read())[0]
+                if 'error' in result:
+                    logger.error(json.dumps({"E7489 error": {"description": result["error"]["description"]}}))
+                    time.sleep(10)
+                else:
+                    logger.debug("D6282 API key successfully created: %s" % result["success"]["username"])
+                    return result["success"]["username"]
+            except Exception, err:
+                logger.error("E9800 %s" % err, exc_info=True)
+                return False
 
+#DEPRECATED
 def load_settings(ip_address, key, cur_settings=None):
     if cur_settings is None:
         cur_settings = {}
@@ -928,34 +973,31 @@ def load_settings(ip_address, key, cur_settings=None):
     with open(settings_file, 'w') as set_file:
         json.dump(settings_data, set_file)
 
+def parse_settings(bridgeIndex="1"):
+    try:
+        # logger.debug("#D5459 Retrieving IP/Key for bridge %s" % str(bridgeIndex))
+        currBridge = file_settings[bridgeIndex]
+        http_ip_address = currBridge['internalipaddress']
+        http_key = currBridge['key']
+        return http_ip_address, http_key, len(file_settings)
+    except:
+        pass
 
 if __name__ == '__main__':
     home = expanduser("~")
     # Argument parser and options
     parser = argparse.ArgumentParser(description="J14 HTTP-Savant Relay Server")
-    parser.add_argument('-l', '--log', help="Logging Level: CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET",
-                        required=False, default="INFO")
-    parser.add_argument('-d', '--debug', help="Set Logging Level to DEBUG",
-                        required=False, action='store_true')
-    parser.add_argument('-v', '--verbose', help="Set DEBUG logging to VERBOSE",
-                        required=False, action='store_true')
-    parser.add_argument('-f', '--file', help="Logging File path",
-                        required=False, default="%s/http-savant.log" % home)
-    parser.add_argument('-P', '--port', help="Port to start the telnet server on (for Savant communication)",
-                        required=False, default=8085)
-    parser.add_argument('-k', '--key', help="HTTP API Key",
-                        required=False, default="")
-    parser.add_argument('-a', '--address', help="HTTP API IP address",
-                        required=False, default="")
-    parser.add_argument('-i', '--interval', help="HTTP API device status polling interval (in seconds)",
-                        required=False, default=1.0)
-    parser.add_argument('-m', '--maxrecon', help="Maximum number of restarts after script crash",
-                        required=False, default=100)
-    parser.add_argument('-r', '--recontime', help="First reconnect delay",
-                        required=False, default=2)
-    parser.add_argument('-t', '--type', help="Add multiple arguments to increase the sensor, "
-                                             "and group types we are looking for",
-                        required=False, action='append', type=str)
+    parser.add_argument('-l', '--log', help="Logging Level: CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET", required=False, default="INFO")
+    parser.add_argument('-d', '--debug', help="Set Logging Level to DEBUG", required=False, action='store_true')
+    parser.add_argument('-v', '--verbose', help="Set DEBUG logging to VERBOSE", required=False, action='store_true')
+    parser.add_argument('-f', '--file', help="Logging File path", required=False, default="%s/http-savant.log" % home)
+    parser.add_argument('-P', '--port', help="Port to start the telnet server on (for Savant communication)", required=False, default=8085)
+    parser.add_argument('-k', '--key', help="HTTP API Key", required=False, default="")
+    parser.add_argument('-a', '--address', help="HTTP API IP address", required=False, default="")
+    parser.add_argument('-i', '--interval', help="HTTP API device status polling interval (in seconds)", required=False, default=1.0)
+    parser.add_argument('-m', '--maxrecon', help="Maximum number of restarts after script crash", required=False, default=100)
+    parser.add_argument('-r', '--recontime', help="First reconnect delay", required=False, default=2)
+    parser.add_argument('-t', '--type', help="Add multiple arguments to increase the sensor, and group types we are looking for", required=False, action='append', type=str)
     args = parser.parse_args()
     log_exists = os.path.isfile(args.file)
     verbose = False
@@ -985,7 +1027,8 @@ if __name__ == '__main__':
     reconnect_delay = args.recontime
     devicetypes = ['SML001', 'Room']
     remove_keys = ['swupdate', 'swversion', 'uniqueid', 'capabilities', 'colorgamut', 'config',  'productname', 'manufacturername']
-    settings_file = "%s/savant-hue.json" % home
+    settings_file = "%s/savant-hue-array.json" % home
+    all_scene_data = {}
 
     # Start fresh log file
     if log_exists:
@@ -999,15 +1042,18 @@ if __name__ == '__main__':
             logger.debug("#D8620 Adding device type '%s' to monitor" % watchtype)
             devicetypes.append(watchtype)
 
-    # Load settings
+    # Begin HTTP_Discovery thread
+
+    # Load settings - to be merged with HTTP Discovery
     if http_key == "" or http_ip_address == "":
         try:
             with open(settings_file, 'r') as fp:
                 file_settings = json.load(fp)
-            load_settings(http_ip_address, http_key, file_settings)
+            # load_settings(http_ip_address, http_key, file_settings)
         except IOError:
             logger.error("#E2961 No Settings File, creating new file and adding settings")
-            new_settings_data = {"key": "", "internalipaddress": ""}
+            # new_settings_data = {"key": "", "internalipaddress": ""}
+            new_settings_data = {"1":{"Name": "Bridge_1", "internalipaddress": "", "key": ""}}
             with open(settings_file, 'w') as fp:
                 json.dump(new_settings_data, fp)
             load_settings(http_ip_address, http_key)
@@ -1027,9 +1073,29 @@ if __name__ == '__main__':
         logger.debug("#D9328 Starting main loop")
         if max_reconnects > 1:
             try:
-                logger.debug("#D2801 Starting 'run()' function")
+                logger.debug("#D2801 Begin Execution")
                 server_running = True
-                run()
+                queue = Queue(maxsize=100) # Why max size 100?
+                try:
+                    logger.debug("#D3571 Starting the HTTP communications thread")
+                    httpcomms = HTTPBridge(queue)
+                    logger.debug("#D9699 Starting the Savant communications thread")
+                    CommunicationServer(queue, httpcomms).start()
+                    while server_running:
+                        time.sleep(5)
+                    queue.put('shutdown')
+                    logger.info('#I3608 Restart request detected, restarting server')
+                except KeyboardInterrupt:
+                    queue.put('shutdown')
+                    logger.info('#I8417 KeyboardInterrupt detected, shutting down server')
+                    raise SystemExit
+                except Exception, err:
+                    queue.put('shutdown')
+                    logger.error("#E3002 %s" % err, exc_info=True)
+                finally:
+                    logger.debug("#D7856 End Execution")
+                    queue.put('shutdown')
+
             except socket.error, err:
                 logger.error('#E2114 Connect error: %s' % err, exc_info=True)
                 reconnect_delay *= 2
